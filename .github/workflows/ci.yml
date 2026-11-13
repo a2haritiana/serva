@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck version
+        run: shellcheck --version
+      - name: ShellCheck
+        run: shellcheck -x serva install.sh lib/*.sh modules/base/*.sh tests/*.bash
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y -q bats
+      - name: Unit tests
+        run: bats tests
+      - name: Dry run of the full flow
+        run: sudo ./serva setup --yes --dry-run --config tests/fixtures/ci.env

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# serva - set up and harden a fresh Ubuntu or Debian VPS for app deployment.
+# https://github.com/a2haritiana/serva - MIT License
+set -Eeuo pipefail
+
+SERVA_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/core.sh
+source "${SERVA_HOME}/lib/core.sh"
+# shellcheck source=lib/ui.sh
+source "${SERVA_HOME}/lib/ui.sh"
+# shellcheck source=lib/os.sh
+source "${SERVA_HOME}/lib/os.sh"
+# shellcheck source=lib/state.sh
+source "${SERVA_HOME}/lib/state.sh"
+# shellcheck source=lib/report.sh
+source "${SERVA_HOME}/lib/report.sh"
+# shellcheck source=lib/modules.sh
+source "${SERVA_HOME}/lib/modules.sh"
+module::load_all
+
+usage() {
+  cat <<EOF
+serva ${SERVA_VERSION} - set up and harden a fresh VPS for app deployment.
+
+Usage: sudo serva [setup [STEP...] | status | list | help | version] [OPTIONS]
+
+  (no command)     interactive menu
+  setup [STEP...]  set up the base system (all steps by default)
+  status           show which steps are in place
+  list             list the steps
+
+Steps: ${SERVA_BASE_MODULES[*]}
+
+Options:
+  -n, --dry-run      show what would be done, change nothing
+  -y, --yes          no questions: config file values and safe defaults
+  -c, --config FILE  read SERVA_KEY=value settings from FILE
+
+https://github.com/a2haritiana/serva
+EOF
+}
+
+cmd::setup() {
+  local selected=("$@") items=() m out
+  if ((${#selected[@]} == 0)) && [[ -n "${SERVA_MODULES:-}" ]]; then
+    read -r -a selected <<<"${SERVA_MODULES//,/ }"
+  elif ((${#selected[@]} == 0)); then
+    for m in "${SERVA_BASE_MODULES[@]}"; do items+=("$m" "$("${m}::describe")" ON); done
+    out="$(ui::checklist "Base system" "Steps to run. Each one explains itself and asks before important changes; modified files are backed up in /var/backups/serva. Keep this terminal open until the end." "${items[@]}")" || return 0
+    read -r -d '' -a selected <<<"$out" || true
+  fi
+  for m in "${selected[@]}"; do
+    module::exists "$m" || core::die "Unknown step: ${m} (steps: ${SERVA_BASE_MODULES[*]})"
+  done
+  local rc=0
+  module::run_many "${selected[@]}" || rc=1
+  report::finish
+  return "$rc"
+}
+
+cmd::status() {
+  local m
+  printf '%-10s %-13s %s\n' STEP STATE 'LAST RUN'
+  for m in "${SERVA_BASE_MODULES[@]}"; do
+    printf '%-10s %-13s %s\n' "$m" "$("${m}::check" >/dev/null 2>&1 && echo 'in place' || echo 'not in place')" "$(state::module_last "$m")"
+  done
+}
+
+cmd::list() {
+  local m
+  for m in "${SERVA_BASE_MODULES[@]}"; do printf '%-10s %s\n' "$m" "$("${m}::describe")"; done
+}
+
+cmd::menu() {
+  ui::is_interactive || core::die "No command: with --yes, use 'serva setup --yes --config FILE'."
+  local choice items=() m tmp
+  for m in "${SERVA_BASE_MODULES[@]}"; do items+=("$m" "$("${m}::describe")"); done
+  while choice="$(ui::menu "serva ${SERVA_VERSION}" "What do you want to do?" setup \
+    setup "Set up the base system (recommended)" step "Run a single step" status "Show what is in place" quit "Quit")"; do
+    case "$choice" in
+      setup) cmd::setup || true ;;
+      step) m="$(ui::menu "Run a single step" "Which step?" user "${items[@]}")" && { cmd::setup "$m" || true; } ;;
+      status) tmp="$(mktemp)" && cmd::status >"$tmp" && ui::textbox "Status" "$tmp" && rm -f "$tmp" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+main() {
+  local cmd='' args=()
+  while (($#)); do
+    case "$1" in
+      -n | --dry-run) SERVA_DRY_RUN=1 ;;
+      -y | --yes) SERVA_ASSUME_YES=1 ;;
+      -c | --config) SERVA_CONFIG="${2:?--config needs a file}" && shift ;;
+      --config=*) SERVA_CONFIG="${1#*=}" ;;
+      -h | --help) cmd=help ;;
+      -V | --version) cmd=version ;;
+      -*) core::die "Unknown option: $1 (see serva --help)" ;;
+      *) if [[ -z "$cmd" ]]; then cmd="$1"; else args+=("$1"); fi ;;
+    esac
+    shift
+  done
+  case "${cmd:=menu}" in
+    help) usage && return 0 ;;
+    version) echo "serva ${SERVA_VERSION}" && return 0 ;;
+    list) cmd::list && return 0 ;;
+    menu | setup | status) ;;
+    *) core::die "Unknown command: ${cmd} (see serva --help)" ;;
+  esac
+  [[ -z "${SERVA_CONFIG:-}" ]] || core::load_config "$SERVA_CONFIG"
+  core::init
+  trap 'log::error "Unexpected error (line ${LINENO}). Details in ${SERVA_LOG}."' ERR
+  os::require_supported
+  [[ "$cmd" == status ]] || ui::init
+  core::is_dry_run && log::warn "Dry run: nothing will be changed on this server."
+  case "$cmd" in
+    menu) cmd::menu ;;
+    setup) cmd::setup "${args[@]}" ;;
+    status) cmd::status ;;
+  esac
+}
+
+main "$@"
